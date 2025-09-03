@@ -1,0 +1,70 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String      @id @default(cuid())
+  githubId   String      @unique
+  name       String?
+  avatarUrl  String?
+  createdAt  DateTime    @default(now())
+  reviewRuns ReviewRun[] @relation("UserToReviewRun")
+}
+
+model PullRequest {
+  id         String      @id @default(cuid())
+  repo       String
+  number     Int
+  title      String
+  author     String
+  headSha    String
+  baseSha    String
+  state      String
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  files      PRFile[]
+  reviewRuns ReviewRun[]
+
+  @@unique([repo, number]) // each repo+PR number pair is unique
+}
+
+model PRFile {
+  id          String      @id @default(cuid())
+  prId        String
+  path        String
+  patch       String
+  PullRequest PullRequest @relation(fields: [prId], references: [id])
+}
+
+model ReviewRun {
+  id          String       @id @default(cuid())
+  prId        String
+  status      String // queued | running | completed | failed
+  startedAt   DateTime?
+  completedAt DateTime?
+  provider    String?
+  suggestions Suggestion[]
+  // relations
+  PullRequest PullRequest  @relation(fields: [prId], references: [id])
+
+  // optional link to the user who triggered the run
+  userId String?
+  user   User?   @relation("UserToReviewRun", fields: [userId], references: [id])
+}
+
+model Suggestion {
+  id        String    @id @default(cuid())
+  runId     String
+  filePath  String
+  startLine Int
+  endLine   Int
+  message   String
+  fixPatch  String?
+  severity  String // info | warn | error | security
+  ReviewRun ReviewRun @relation(fields: [runId], references: [id])
+}

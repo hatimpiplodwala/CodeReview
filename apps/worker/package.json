@@ -1,0 +1,14 @@
+{
+  "name": "@app/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "tsx src/index.ts" },
+  "dependencies": {
+    "@repo/db": "workspace:*",
+    "bullmq": "^5.6.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.57.0"
+  },
+  "devDependencies": { "tsx": "^4.16.2" }
+}

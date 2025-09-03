@@ -1,0 +1,32 @@
+{
+  "name": "CodeReview",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev:api": "pnpm --filter @app/api dev",
+    "dev:web": "pnpm --filter @app/web dev",
+    "dev:worker": "pnpm --filter @app/worker dev",
+    "dev:all": "concurrently -n WEB,API,WORKER -c auto \"pnpm dev:web\" \"pnpm dev:api\" \"pnpm dev:worker\"",
+    "up:infra": "docker compose up -d",
+    "down:infra": "docker compose down"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.15.0",
+  "devDependencies": {
+    "@prisma/client": "^6.15.0",
+    "concurrently": "^9.2.1",
+    "prettier": "^3.6.2",
+    "prisma": "^6.15.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "bullmq": "^5.58.2",
+    "concurrently": "^8.2.2",
+    "dotenv": "^16.6.1"
+  }
+}
