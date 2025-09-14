@@ -1,50 +1,71 @@
 import "dotenv/config";
-import { Worker, QueueEvents } from "bullmq";
+import { Worker } from "bullmq";
 import { db } from "@repo/db";
-import OpenAI from "openai";
+
+/** === Env / Config === */
+type JobData = { prId: string; runId: string; model?: string };
 
 const connection = { url: process.env.REDIS_URL || "redis://127.0.0.1:6379" };
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const events = new QueueEvents("review", { connection });
-events.on("waiting", ({ jobId }) => console.log("[review] waiting", jobId));
-events.on("active", ({ jobId }) => console.log("[review] active", jobId));
-events.on("completed", ({ jobId }) => console.log("[review] completed", jobId));
-events.on("failed", ({ jobId, failedReason }) => console.error("[review] failed", jobId, failedReason));
+const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
+const DEFAULT_MODEL   = process.env.OLLAMA_MODEL || "qwen2.5-coder:7b";
+const FALLBACKS       = (process.env.OLLAMA_FALLBACKS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
-type JobData = { prId: string; runId: string };
+const AI_TIMEOUT_PRIMARY_MS = Number(process.env.AI_TIMEOUT_MS || 90000);
+const AI_TIMEOUT_RETRY_MS   = Math.max(30000, Math.floor(AI_TIMEOUT_PRIMARY_MS * 0.66));
+const AI_MAX_TOKENS         = Number(process.env.AI_MAX_TOKENS || 512);
+const AI_TEMPERATURE        = Number(process.env.AI_TEMPERATURE || 0.1);
 
-function buildPrompt(filePath: string, patch: string) {
-  return `
-You are an expert code reviewer. Analyze the UNIFIED DIFF PATCH below and produce JSON with suggestions.
-Focus on correctness, security, performance, style, and maintainability. If no issues, return an empty array [].
+const MAX_PATCH_LINES       = Number(process.env.MAX_PATCH_LINES || 800);
+const MAX_PATCH_CHARS       = Number(process.env.MAX_PATCH_CHARS || 40000);
+const MAX_HUNKS_PER_FILE    = Number(process.env.MAX_HUNKS_PER_FILE || 6);
 
-Return JSON only with this array shape:
-[
-  {
-    "filePath": "string",
-    "startLine": 0,
-    "endLine": 0,
-    "severity": "info|warn|error|security",
-    "message": "human-friendly explanation",
-    "fixPatch": "optional unified diff snippet applying a fix"
-  }
-]
+/** === Helpers === */
 
-Constraints:
-- startLine/endLine refer to the *new* file's line numbers where possible.
-- If line numbers are unclear, best-effort estimate and set start=end.
-- Keep messages concise and actionable.
-
-FILE: ${filePath}
-PATCH:
-${patch}
-`.trim();
+function clampPatch(patch: string) {
+  const lines = patch.split("\n");
+  const clipped = lines.slice(0, MAX_PATCH_LINES).join("\n");
+  return clipped.slice(0, MAX_PATCH_CHARS);
 }
 
-function safeParseArray(jsonText: string): any[] {
+function splitIntoHunks(patch: string): string[] {
+  const lines = (patch || "").split("\n");
+  const hunks: string[] = [];
+  let cur: string[] = [];
+  for (const l of lines) {
+    if (l.startsWith("@@")) {
+      if (cur.length) hunks.push(cur.join("\n"));
+      cur = [l];
+    } else {
+      cur.push(l);
+    }
+  }
+  if (cur.length) hunks.push(cur.join("\n"));
+  return hunks;
+}
+
+function buildPrompt(filePath: string, patch: string) {
+  return [
+    "You are a senior engineer. Review the unified diff PATCH and return ONLY a JSON array (no prose).",
+    "Array schema:",
+    "[",
+    '  {"filePath":"<string>","startLine":<int>,"endLine":<int>,"severity":"info|warn|error|security","message":"<string>","fixPatch":"<unified diff or omit>"}',
+    "]",
+    "- Comment only on potential issues or clear improvements.",
+    "- Lines refer to NEW file numbering. If unclear, estimate and set startLine=endLine.",
+    "- Keep messages concise and actionable.",
+    `FILE: ${filePath}`,
+    "PATCH:",
+    patch,
+  ].join("\n");
+}
+
+function safeParseArray(text: string): any[] {
   try {
-    const cleaned = jsonText.replace(/```json/gi, "```").replace(/```/g, "").trim();
+    const cleaned = String(text || "").replace(/```json|```/gi, "").trim();
     const parsed = JSON.parse(cleaned);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -52,57 +73,131 @@ function safeParseArray(jsonText: string): any[] {
   }
 }
 
-// --- AI call with fallback ---
-async function getSuggestionsFromAI(prompt: string): Promise<{ arr: any[]; usedMock: boolean }> {
-  // 1) try gpt-4o-mini
-  try {
-    const r = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1,
+function ruleBasedHints(path: string, patch: string) {
+  const lower = (patch || "").toLowerCase();
+  const hints: any[] = [];
+  if (/\beval\s*\(/i.test(patch)) {
+    hints.push({
+      filePath: path,
+      startLine: 1,
+      endLine: 1,
+      severity: "security",
+      message: "Avoid eval(): security and performance risk. Use safe parsing or explicit functions.",
+      fixPatch: null,
     });
-    const text = r.choices?.[0]?.message?.content ?? "[]";
-    const arr = safeParseArray(text);
-    if (arr.length || text.trim() === "[]") return { arr, usedMock: false };
-  } catch (e: any) {
-    console.warn("[ai] 4o-mini failed:", e?.status || e?.code || e?.message);
   }
-
-  // 2) fallback to gpt-3.5-turbo
-  try {
-    const r = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1,
+  if (lower.includes("innerhtml")) {
+    hints.push({
+      filePath: path,
+      startLine: 1,
+      endLine: 1,
+      severity: "security",
+      message: "Direct innerHTML can enable XSS. Prefer textContent or sanitize inputs.",
+      fixPatch: null,
     });
-    const text = r.choices?.[0]?.message?.content ?? "[]";
-    const arr = safeParseArray(text);
-    if (arr.length || text.trim() === "[]") return { arr, usedMock: false };
-  } catch (e: any) {
-    console.warn("[ai] 3.5-turbo failed:", e?.status || e?.code || e?.message);
   }
-
-  // 3) last resort: mock
-  return {
-    usedMock: true,
-    arr: [
-      {
-        filePath: "unknown",
-        startLine: 1,
-        endLine: 1,
-        severity: "info",
-        message: "Mock suggestion (AI unavailable): add a brief comment describing this change.",
-        fixPatch: null,
-      },
-    ],
-  };
+  if (/console\.log\(/i.test(patch) && /return /.test(patch)) {
+    hints.push({
+      filePath: path,
+      startLine: 1,
+      endLine: 1,
+      severity: "info",
+      message: "Remove stray console.log in production code.",
+      fixPatch: null,
+    });
+  }
+  return hints;
 }
 
+/** Call Ollama /api/generate with staged timeouts and keep_alive to reduce cold-start cost. */
+async function callOllamaGenerate({
+  model,
+  prompt,
+  timeoutMs,
+  maxTokens,
+  temperature,
+}: {
+  model: string;
+  prompt: string;
+  timeoutMs: number;
+  maxTokens: number;
+  temperature: number;
+}): Promise<string> {
+  const controller = new AbortController();
+  const to = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        prompt,
+        options: {
+          num_ctx: 8192,
+          num_predict: maxTokens,
+          temperature,
+          keep_alive: "5m",
+        },
+        stream: false,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`ollama ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const json: any = await res.json();
+    return String(json?.response ?? "[]");
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+/** Try preferred model, then fallbacks, with staged timeouts. */
+async function getSuggestionsFromAI(prompt: string, preferred?: string) {
+  const candidates = [preferred || DEFAULT_MODEL, ...FALLBACKS];
+  for (const m of candidates) {
+    try {
+      const t0 = Date.now();
+      let text = await callOllamaGenerate({
+        model: m,
+        prompt,
+        timeoutMs: AI_TIMEOUT_PRIMARY_MS,
+        maxTokens: AI_MAX_TOKENS,
+        temperature: AI_TEMPERATURE,
+      });
+      let arr = safeParseArray(text);
+      if (!arr.length) {
+        // quick retry with smaller budget
+        text = await callOllamaGenerate({
+          model: m,
+          prompt,
+          timeoutMs: AI_TIMEOUT_RETRY_MS,
+          maxTokens: Math.max(128, Math.floor(AI_MAX_TOKENS / 2)),
+          temperature: AI_TEMPERATURE,
+        });
+        arr = safeParseArray(text);
+      }
+      if (arr.length) {
+        console.log("[ai] model=%s ms=%d items=%d", m, Date.now() - t0, arr.length);
+        return { arr, provider: `ollama:${m}` };
+      }
+      console.warn("[ai] empty json from model %s", m);
+    } catch (e: any) {
+      console.warn("[ai] %s failed: %s", m, e?.message || e);
+    }
+  }
+  return { arr: [], provider: "mock" };
+}
+
+/** === Worker === */
 new Worker<JobData>(
   "review",
   async (job) => {
-    const { prId, runId } = job.data;
-    console.log("[review] process start", { prId, runId });
+    const { prId, runId, model } = job.data;
+    const chosenModel = model || DEFAULT_MODEL;
+
+    console.log("[review] process start", { prId, runId, chosenModel });
 
     try {
       await db.reviewRun.update({
@@ -117,58 +212,115 @@ new Worker<JobData>(
       if (!pr) throw new Error("PR not found");
 
       const suggestionsAll: any[] = [];
-      let anyMock = false;
+      const providersSeen: string[] = [];
 
       for (const file of pr.files) {
         if (!file.patch?.trim()) continue;
 
-        const prompt = buildPrompt(file.path, file.patch);
-        const { arr, usedMock } = await getSuggestionsFromAI(prompt);
-        if (usedMock) anyMock = true;
+        try {
+          const patch = clampPatch(file.patch);
+          const hunks = splitIntoHunks(patch).slice(0, MAX_HUNKS_PER_FILE);
 
-        // Ensure at least one per-file suggestion if we're mocking
-        const results = (arr && arr.length > 0)
-          ? arr
-          : (usedMock ? [{
-              filePath: file.path,           // 👈 key: attach to this file
-              startLine: 1,
-              endLine: 1,
-              severity: "info",
-              message: "Mock: add a brief comment explaining this change.",
-              fixPatch: null,
-            }] : []);
+          let fileSuggestions: any[] = [];
 
-        for (const s of results) {
-          if (!s?.message) continue;
+          for (let i = 0; i < hunks.length; i++) {
+            const hunkPrompt = buildPrompt(`${file.path} (hunk ${i + 1}/${hunks.length})`, hunks[i]);
+            const { arr, provider } = await getSuggestionsFromAI(hunkPrompt, chosenModel);
+            if (provider) providersSeen.push(provider);
+
+            const normalized = (arr ?? []).map((s: any) => ({
+              ...s,
+              filePath: !s?.filePath || s.filePath === "unknown" ? file.path : s.filePath,
+              severity: ["info", "warn", "error", "security"].includes(s?.severity) ? s.severity : "info",
+              startLine: Number.isFinite(+s?.startLine) ? +s.startLine : 1,
+              endLine: Number.isFinite(+s?.endLine)
+                ? +s.endLine
+                : Number.isFinite(+s?.startLine)
+                ? +s.startLine
+                : 1,
+              message: String(s?.message ?? "").slice(0, 1000),
+              fixPatch: s?.fixPatch ? String(s.fixPatch).slice(0, 5000) : null,
+            }));
+
+            fileSuggestions.push(...normalized);
+          }
+
+          if (fileSuggestions.length === 0) {
+            const hints = ruleBasedHints(file.path, patch);
+            if (hints.length) fileSuggestions = hints;
+          }
+
+          if (fileSuggestions.length === 0) {
+            fileSuggestions = [
+              {
+                filePath: file.path,
+                startLine: 1,
+                endLine: 1,
+                severity: "info",
+                message: "No clear issues found. Consider adding/expanding unit tests for this change.",
+                fixPatch: null,
+              },
+            ];
+          }
+
+          suggestionsAll.push(
+            ...fileSuggestions.map((r) => ({
+              runId,
+              filePath: r.filePath,
+              startLine: r.startLine,
+              endLine: r.endLine,
+              message: r.message,
+              fixPatch: r.fixPatch ?? undefined,
+              severity: r.severity,
+            }))
+          );
+          console.log("[review] analyzed", file.path, "suggestions:", fileSuggestions.length);
+        } catch (e: any) {
+          console.warn("[review] file failed", file.path, e?.message || e);
           suggestionsAll.push({
             runId,
-            filePath: s.filePath || file.path,
-            startLine: Number.isFinite(+s.startLine) ? +s.startLine : 1,
-            endLine: Number.isFinite(+s.endLine)
-              ? +s.endLine
-              : Number.isFinite(+s.startLine) ? +s.startLine : 1,
-            message: String(s.message).slice(0, 1000),
-            fixPatch: s.fixPatch ? String(s.fixPatch).slice(0, 5000) : null,
-            severity: ["info","warn","error","security"].includes(s.severity) ? s.severity : "info",
+            filePath: file.path,
+            startLine: 1,
+            endLine: 1,
+            message: "Mock suggestion (AI unavailable): add a brief comment describing this change.",
+            fixPatch: undefined,
+            severity: "info",
           });
+          providersSeen.push("mock");
         }
       }
+
+      if (suggestionsAll.length === 0) {
+        suggestionsAll.push({
+          runId,
+          filePath: "unknown",
+          startLine: 1,
+          endLine: 1,
+          message: "No files with diffs were analyzed. Provide a unified diff patch to get suggestions.",
+          fixPatch: undefined,
+          severity: "info",
+        });
+        providersSeen.push("mock");
+      }
+
       if (suggestionsAll.length) {
         await db.suggestion.createMany({
           data: suggestionsAll.map(({ fixPatch, ...rest }) => ({ ...rest, fixPatch: fixPatch ?? undefined })),
         });
       }
 
+      const providerFinal = providersSeen.find((p) => p.startsWith("ollama:")) || "mock";
       await db.reviewRun.update({
         where: { id: runId },
-        data: {
-          status: "completed",
-          completedAt: new Date(),
-          provider: anyMock ? "mock" : "openai", // 👈 use the run-level flag
-        },
+        data: { status: "completed", completedAt: new Date(), provider: providerFinal },
       });
 
-      console.log("[review] process done", { prId, runId, count: suggestionsAll.length });
+      console.log("[review] process done", {
+        prId,
+        runId,
+        count: suggestionsAll.length,
+        provider: providerFinal,
+      });
       return { count: suggestionsAll.length };
     } catch (err: any) {
       console.error("[review] process error", err?.message || err);
@@ -178,6 +330,3 @@ new Worker<JobData>(
   },
   { connection, concurrency: 1 }
 );
-
-
-console.log("Worker ready.");

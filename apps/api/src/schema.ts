@@ -1,53 +1,7 @@
-import { gql } from "graphql-tag";
+import { gql } from "@apollo/client";
 import type { PrismaClient } from "@prisma/client";
 
-export const typeDefs = gql/* GraphQL */ `
-  scalar DateTime
-
-  type Suggestion {
-    id: ID!
-    filePath: String!
-    startLine: Int!
-    endLine: Int!
-    message: String!
-    fixPatch: String
-    severity: String!
-  }
-
-  type PRFile {
-    id: ID!
-    path: String!
-    patch: String!
-  }
-
-  type ReviewRun {
-    id: ID!
-    status: String!
-    provider: String
-    startedAt: DateTime
-    completedAt: DateTime
-    suggestions: [Suggestion!]!
-  }
-
-  type PullRequest {
-    id: ID!
-    repo: String!
-    number: Int!
-    title: String!
-    author: String!
-    headSha: String!
-    baseSha: String!
-    state: String!
-    createdAt: DateTime!
-    files: [PRFile!]!
-    reviewRuns: [ReviewRun!]!
-  }
-
-  input PRFileInput {
-    path: String!
-    patch: String!
-  }
-
+export const typeDefs = `#graphql
   input CreatePRInput {
     repo: String!
     number: Int!
@@ -58,6 +12,47 @@ export const typeDefs = gql/* GraphQL */ `
     files: [PRFileInput!]!
   }
 
+  input PRFileInput {
+    path: String!
+    patch: String!
+  }
+
+  type Suggestion {
+    id: ID!
+    filePath: String!
+    startLine: Int!
+    endLine: Int!
+    severity: String!
+    message: String!
+    fixPatch: String
+  }
+
+  type ReviewRun {
+    id: ID!
+    status: String!
+    provider: String
+    suggestions: [Suggestion!]!
+  }
+
+  type PRFile {
+    id: ID!
+    path: String!
+    patch: String!
+  }
+
+  type PullRequest {
+    id: ID!
+    repo: String!
+    number: Int!
+    title: String!
+    author: String!
+    headSha: String!
+    baseSha: String!
+    state: String
+    files: [PRFile!]!
+    reviewRuns: [ReviewRun!]!
+  }
+
   type Query {
     hello: String!
     prs: [PullRequest!]!
@@ -66,6 +61,7 @@ export const typeDefs = gql/* GraphQL */ `
 
   type Mutation {
     createPR(input: CreatePRInput!): PullRequest!
+    runAnalysis(prId: ID!, model: String): ReviewRun!
   }
 `;
 

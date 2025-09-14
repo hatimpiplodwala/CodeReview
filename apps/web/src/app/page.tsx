@@ -1,39 +1,39 @@
-"use client";
+import Link from "next/link";
 
-import { gql, useQuery } from "@apollo/client";
-import Editor from "@monaco-editor/react";
-
-const HELLO = gql`query { hello }`;
-
-export default function Home() {
-  const { data, loading, error } = useQuery(HELLO);
-
+export default function HomePage() {
   return (
-    <main className="p-6 space-y-6">
-      <div className="space-x-3">
-        <a className="underline" href="/prs">View PRs</a>
-        <a className="underline" href="/prs/new">New PR</a>
+    <div className="grid gap-6 md:grid-cols-2">
+      <section className="col-span-2 card p-8 bg-[color:var(--bg-light)]">
+        <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-[color:var(--fg)]">
+          Ship better code with AI-assisted reviews
+        </h1>
+        <p className="mt-3 text-[color:var(--fg-muted)] max-w-2xl">
+          Paste a PR diff, run analysis locally via Ollama, and get actionable suggestions for
+          security, performance, style, and maintainability.
+        </p>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <Link href="/prs/new" className="btn-primary">Create PR</Link>
+          <Link href="/prs" className="btn-secondary">View PRs</Link>
+        </div>
+      </section>
+
+      <div className="card">
+        <h2 className="font-semibold">How it works</h2>
+        <ol className="mt-3 space-y-2 text-sm text-[color:var(--fg)]/80 list-decimal list-inside">
+          <li>Create a PR with one or more unified diff patches.</li>
+          <li>Run analysis — the worker sends diffs to your local model via Ollama.</li>
+          <li>Review suggestions inline and copy/download fix patches.</li>
+        </ol>
       </div>
 
-      <h1 className="text-2xl font-bold">AI Code Review — Web</h1>
-
-      <section className="p-4 rounded border">
-        <h2 className="font-semibold mb-2">GraphQL connectivity</h2>
-        {loading && <p>Loading…</p>}
-        {error && <p className="text-red-600">Error: {error.message}</p>}
-        {data && <p>API says: <span className="font-mono">{data.hello}</span></p>}
-      </section>
-
-      <section className="p-4 rounded border">
-        <h2 className="font-semibold mb-2">Monaco editor (demo)</h2>
-        <Editor
-          height="50vh"
-          defaultLanguage="typescript"
-          theme="vs-dark"
-          defaultValue={`// Monaco is working.\nfunction greet(name: string){\n  return \`Hello, \${name}\`;\n}`}
-          options={{ readOnly: false, minimap: { enabled: false } }}
-        />
-      </section>
-    </main>
+      <div className="card">
+        <h2 className="font-semibold">Tips</h2>
+        <ul className="mt-3 space-y-2 text-sm text-[color:var(--fg)]/80 list-disc list-inside">
+          <li>Try “JS: eval & innerHTML” patterns to see security suggestions.</li>
+          <li>Use smaller models (e.g. <code>mistral</code>) for speed.</li>
+          <li>Truncate huge patches to keep analysis snappy.</li>
+        </ul>
+      </div>
+    </div>
   );
 }

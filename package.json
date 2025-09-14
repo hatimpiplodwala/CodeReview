@@ -4,11 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepare:db": "pnpm -C packages/db exec prisma migrate deploy && pnpm -C packages/db exec prisma generate",
+
     "dev:api": "pnpm --filter @app/api dev",
     "dev:web": "pnpm --filter @app/web dev",
     "dev:worker": "pnpm --filter @app/worker dev",
-    "dev:all": "concurrently -n WEB,API,WORKER -c auto \"pnpm dev:web\" \"pnpm dev:api\" \"pnpm dev:worker\"",
+
+    "dev:all": "pnpm run prepare:db && concurrently -n API,WEB,WORKER -c cyan,magenta,green \"pnpm dev:api\" \"pnpm dev:web\" \"pnpm dev:worker\"",
     "up:infra": "docker compose up -d",
     "down:infra": "docker compose down"
   },
@@ -27,6 +29,8 @@
   "dependencies": {
     "bullmq": "^5.58.2",
     "concurrently": "^8.2.2",
-    "dotenv": "^16.6.1"
+    "dotenv": "^16.6.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   }
 }
